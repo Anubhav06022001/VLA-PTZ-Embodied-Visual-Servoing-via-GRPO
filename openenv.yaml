@@ -1,0 +1,21 @@
+spec_version: 1
+name: "camera_ptz_alignment"
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+
+# Mandatory for Hackathon: Defining the 3 levels of difficulty
+tasks:
+  - id: "glitch_easy"
+    description: "Minor software glitch causing 5% drift. Target is very close."
+    difficulty: "easy"
+  - id: "human_touch_medium"
+    description: "Physical contact with camera housing causing 20% drift."
+    difficulty: "medium"
+  - id: "hardware_drift_hard"
+    description: "Severe mechanical wear causing 50% drift. High precision required."
+    difficulty: "hard"
+
+# This helps the validator find your Environment class
+entry_point: "server.preset_env:CameraPresetEnvironment"
