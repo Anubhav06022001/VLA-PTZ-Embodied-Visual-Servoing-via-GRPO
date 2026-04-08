@@ -1,255 +1,261 @@
 ---
-title: First Rl Demo Environment Server
-emoji: 🖥️
-colorFrom: indigo
-colorTo: red
+title: Camera PTZ Alignment Environment
+emoji: 📹
+colorFrom: blue
+colorTo: green
 sdk: docker
 pinned: false
 app_port: 8000
+app_file: server/app.py
 base_path: /web
 tags:
   - openenv
+  - pytorch-hackathon
+  - reinforcement-learning
+  - continuous-control
 ---
 
-# First Rl Demo Environment
+# Camera PTZ Alignment Environment 🏥
 
-A simple test environment that echoes back messages. Perfect for testing the env APIs as well as demonstrating environment usage patterns.
+A high-precision reinforcement learning environment developed for the **Meta PyTorch OpenEnv Hackathon 2026**. This project simulates the real-world challenge of aligning drifting Hospital Security PTZ (Pan-Tilt-Zoom) cameras back to their calibrated presets.
 
-## Quick Start
+---
 
-The simplest way to use the First Rl Demo environment is through the `FirstRlDemoEnv` class:
+## 📖 Problem Statement
 
-```python
-from first_rl_demo import FirstRlDemoAction, FirstRlDemoEnv
+In large-scale facilities like hospitals, PTZ cameras often lose their alignment due to mechanical wear, physical contact, or vibrations. Maintaining precise coverage is critical for patient safety and security. This environment allows an AI agent to act as a "Virtual Operator," correcting camera drift through iterative, high-precision adjustments.
 
-try:
-    # Create environment from Docker image
-    first_rl_demoenv = FirstRlDemoEnv.from_docker_image("first_rl_demo-env:latest")
+---
 
-    # Reset
-    result = first_rl_demoenv.reset()
-    print(f"Reset: {result.observation.echoed_message}")
+## 🚀 Quick Start
 
-    # Send multiple messages
-    messages = ["Hello, World!", "Testing echo", "Final message"]
-
-    for msg in messages:
-        result = first_rl_demoenv.step(FirstRlDemoAction(message=msg))
-        print(f"Sent: '{msg}'")
-        print(f"  → Echoed: '{result.observation.echoed_message}'")
-        print(f"  → Length: {result.observation.message_length}")
-        print(f"  → Reward: {result.reward}")
-
-finally:
-    # Always clean up
-    first_rl_demoenv.close()
-```
-
-That's it! The `FirstRlDemoEnv.from_docker_image()` method handles:
-- Starting the Docker container
-- Waiting for the server to be ready
-- Connecting to the environment
-- Container cleanup when you call `close()`
-
-## Building the Docker Image
-
-Before using the environment, you need to build the Docker image:
+### Installation
 
 ```bash
-# From project root
-docker build -t first_rl_demo-env:latest -f server/Dockerfile .
+# Clone the repository
+git clone https://github.com/JanaksinhVen/camera-ptz-alignment.git
+cd camera-ptz-alignment
+
+# Sync dependencies and create a virtual environment (.venv) based on uv.loc and pyproject.toml file (Prerequisite: install uv in your system)
+uv sync
 ```
 
-## Deploying to Hugging Face Spaces
+---
 
-You can easily deploy your OpenEnv environment to Hugging Face Spaces using the `openenv push` command:
+## ▶️ Basic Usage
 
-```bash
-# From the environment directory (where openenv.yaml is located)
-openenv push
-
-# Or specify options
-openenv push --namespace my-org --private
-```
-
-The `openenv push` command will:
-1. Validate that the directory is an OpenEnv environment (checks for `openenv.yaml`)
-2. Prepare a custom build for Hugging Face Docker space (enables web interface)
-3. Upload to Hugging Face (ensuring you're logged in)
-
-### Prerequisites
-
-- Authenticate with Hugging Face: The command will prompt for login if not already authenticated
-
-### Options
-
-- `--directory`, `-d`: Directory containing the OpenEnv environment (defaults to current directory)
-- `--repo-id`, `-r`: Repository ID in format 'username/repo-name' (defaults to 'username/env-name' from openenv.yaml)
-- `--base-image`, `-b`: Base Docker image to use (overrides Dockerfile FROM)
-- `--private`: Deploy the space as private (default: public)
-
-### Examples
-
-```bash
-# Push to your personal namespace (defaults to username/env-name from openenv.yaml)
-openenv push
-
-# Push to a specific repository
-openenv push --repo-id my-org/my-env
-
-# Push with a custom base image
-openenv push --base-image ghcr.io/meta-pytorch/openenv-base:latest
-
-# Push as a private space
-openenv push --private
-
-# Combine options
-openenv push --repo-id my-org/my-env --base-image custom-base:latest --private
-```
-
-After deployment, your space will be available at:
-`https://huggingface.co/spaces/<repo-id>`
-
-The deployed space includes:
-- **Web Interface** at `/web` - Interactive UI for exploring the environment
-- **API Documentation** at `/docs` - Full OpenAPI/Swagger interface
-- **Health Check** at `/health` - Container health monitoring
-- **WebSocket** at `/ws` - Persistent session endpoint for low-latency interactions
-
-## Environment Details
-
-### Action
-**FirstRlDemoAction**: Contains a single field
-- `message` (str) - The message to echo back
-
-### Observation
-**FirstRlDemoObservation**: Contains the echo response and metadata
-- `echoed_message` (str) - The message echoed back
-- `message_length` (int) - Length of the message
-- `reward` (float) - Reward based on message length (length × 0.1)
-- `done` (bool) - Always False for echo environment
-- `metadata` (dict) - Additional info like step count
-
-### Reward
-The reward is calculated as: `message_length × 0.1`
-- "Hi" → reward: 0.2
-- "Hello, World!" → reward: 1.3
-- Empty message → reward: 0.0
-
-## Advanced Usage
-
-### Connecting to an Existing Server
-
-If you already have a First Rl Demo environment server running, you can connect directly:
+The following snippet demonstrates how to interact with the environment using the provided `CameraPresetEnv` client.
 
 ```python
-from first_rl_demo import FirstRlDemoEnv
+import asyncio
+from client import CameraPresetEnv, CameraAction
 
-# Connect to existing server
-first_rl_demoenv = FirstRlDemoEnv(base_url="<ENV_HTTP_URL_HERE>")
+async def main():
+    # 1. Initialize environment from Docker image
+    async with await CameraPresetEnv.from_docker_image("camera-ptz-alignment:latest") as env:
+        
+        # 2. Reset with a specific difficulty task
+        result = await env.reset(task_id="human_touch_medium")
+        print(f"Initial Drift Distance: {result.observation.distance_to_target:.4f}")
 
-# Use as normal
-result = first_rl_demoenv.reset()
-result = first_rl_demoenv.step(FirstRlDemoAction(message="Hello!"))
+        # 3. Apply an alignment nudge (Pan Right, Tilt Down)
+        action = CameraAction(delta_pan=0.15, delta_tilt=-0.05, delta_zoom=0.0)
+        result = await env.step(action)
+        
+        print(f"New Distance: {result.observation.distance_to_target:.4f}")
+        print(f"Reward Received: {result.reward:.2f}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-Note: When connecting to an existing server, `first_rl_demoenv.close()` will NOT stop the server.
+---
 
-### Using the Context Manager
+## 🛠️ Reinforcement Learning MDP Details
 
-The client supports context manager usage for automatic connection management:
+### 1. Task Difficulties (Episodes)
 
-```python
-from first_rl_demo import FirstRlDemoAction, FirstRlDemoEnv
+The environment supports three levels of initial drift, defined in `openenv.yaml`:
 
-# Connect with context manager (auto-connects and closes)
-with FirstRlDemoEnv(base_url="http://localhost:8000") as env:
-    result = env.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-    # Multiple steps with low latency
-    for msg in ["Hello", "World", "!"]:
-        result = env.step(FirstRlDemoAction(message=msg))
-        print(f"Echoed: {result.observation.echoed_message}")
+- **glitch_easy**: 10% Initial Drift  
+  _Simulates minor software or jitter errors._
+
+- **human_touch_medium**: 30% Initial Drift  
+  _Simulates physical contact with the camera housing._
+
+- **hardware_drift_hard**: 70% Initial Drift  
+  _Simulates severe mechanical misalignment or motor wear._
+
+---
+
+### 2. Action Space (Continuous Control)
+
+The agent provides a `CameraAction` with three continuous values in the range `[-1.0, 1.0]`:
+
+- `delta_pan`: Horizontal movement  
+- `delta_tilt`: Vertical movement  
+- `delta_zoom`: Focal adjustment  
+
+---
+
+### 3. Observation Space
+
+The `CameraObservation` provides the agent with the necessary state to compute the next move:
+
+- `current_ptz`: `[pan, tilt, zoom]` current coordinates  
+- `target_ptz`: `[pan, tilt, zoom]` goal coordinates (Preset)  
+- `distance_to_target`: Euclidean distance error between current and target  
+
+---
+
+## 🏆 Reward Policy: Progress-Based Shaping
+
+The environment uses **Dense Reward Shaping** to provide immediate feedback after every action.
+
+---
+
+### 1. The Progress Formula (Dense)
+
+**Math:**
+
+```
+Reward = (Previous_Error - Current_Error) * 10.0
 ```
 
-The client uses WebSocket connections for:
-- **Lower latency**: No HTTP connection overhead per request
-- **Persistent session**: Server maintains your environment state
-- **Efficient for episodes**: Better for many sequential steps
+**Logic:**
 
-### Concurrent WebSocket Sessions
+- Moving **closer** → ✅ Positive reward  
+- Moving **away** → ❌ Negative reward  
 
-The server supports multiple concurrent WebSocket connections. To enable this,
-modify `server/app.py` to use factory mode:
+**Scaling:**
 
-```python
-# In server/app.py - use factory mode for concurrent sessions
-app = create_app(
-    FirstRlDemoEnvironment,  # Pass class, not instance
-    FirstRlDemoAction,
-    FirstRlDemoObservation,
-    max_concurrent_envs=4,  # Allow 4 concurrent sessions
-)
+- Multiplier `10.0` amplifies small improvements  
+
+---
+
+### 2. The Success Jackpot (Sparse)
+
+**Condition:**
+
+```
+Current_Error < ALIGNMENT_THRESHOLD (0.03)
 ```
 
-Then multiple clients can connect simultaneously:
+**Bonus:**
 
-```python
-from first_rl_demo import FirstRlDemoAction, FirstRlDemoEnv
-from concurrent.futures import ThreadPoolExecutor
+- `+10.0`
 
-def run_episode(client_id: int):
-    with FirstRlDemoEnv(base_url="http://localhost:8000") as env:
-        result = env.reset()
-        for i in range(10):
-            result = env.step(FirstRlDemoAction(message=f"Client {client_id}, step {i}"))
-        return client_id, result.observation.message_length
+**Result:**
 
-# Run 4 episodes concurrently
-with ThreadPoolExecutor(max_workers=4) as executor:
-    results = list(executor.map(run_episode, range(4)))
-```
+- Episode ends (`done = True`)
 
-## Development & Testing
+**Purpose:**
 
-### Direct Environment Testing
+- Encourages precise alignment quickly  
 
-Test the environment logic directly without starting the HTTP server:
+---
+
+### 3. Physical Constraints
+
+- **Max Velocity Scaling:** `0.2` (20%)
+
+**Purpose:**
+
+- Prevents unrealistic movement  
+- Encourages the agent to learn smooth, realistic motor control trajectories.
+
+---
+
+## 📦 Deployment & Validation
+
+---
+
+### Docker Build
 
 ```bash
-# From the server directory
-python3 server/first_rl_demo_environment.py
+docker build -t camera-ptz-alignment:latest .
 ```
 
-This verifies that:
-- Environment resets correctly
-- Step executes actions properly
-- State tracking works
-- Rewards are calculated correctly
+### Docker Run (Local)
+```bash
+docker run -it -p 8000:8000 camera-ptz-alignment:latest
+```
+---
 
-### Running Locally
-
-Run the server locally for development:
+### Local Validation
 
 ```bash
-uvicorn server.app:app --reload
-```
+uv run openenv validate .
 
-## Project Structure
+[OK] : Ready for multi-mode deployment
+```
+---
 
+### Baseline Inference Proof
+
+```bash
+uv run python inference.py
+
+[START] task=glitch_easy env=camera_ptz_alignment_v1 model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action=move(-0.13,0.09,0.19) reward=0.49 done=false error=null
+[STEP] step=2 action=move(-0.05,0.05,0.05) reward=0.17 done=false error=null
+[STEP] step=3 action=move(-0.09,0.07,0.14) reward=0.36 done=false error=null
+[STEP] step=4 action=move(-0.05,0.05,0.05) reward=0.16 done=false error=null
+[STEP] step=5 action=move(-0.03,0.02,0.05) reward=0.12 done=false error=null
+[STEP] step=6 action=move(-0.06,0.04,0.09) reward=0.23 done=false error=null
+[STEP] step=7 action=move(-0.04,0.03,0.07) reward=0.18 done=false error=null
+[STEP] step=8 action=move(-0.04,0.02,0.06) reward=0.15 done=false error=null
+[STEP] step=9 action=move(-0.03,0.02,0.05) reward=0.12 done=false error=null
+[STEP] step=10 action=move(-0.02,0.02,0.04) reward=0.09 done=false error=null
+[STEP] step=11 action=move(-0.02,0.01,0.03) reward=0.08 done=false error=null
+[STEP] step=12 action=move(-0.01,0.01,0.02) reward=10.06 done=true error=null
+[END] success=true steps=12 score=0.902 rewards=0.49,0.17,0.36,0.16,0.12,0.23,0.18,0.15,0.12,0.09,0.08,10.06
+[START] task=human_touch_medium env=camera_ptz_alignment_v1 model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action=move(0.40,0.46,-0.22) reward=1.30 done=false error=null
+[STEP] step=2 action=move(0.32,0.37,-0.17) reward=1.04 done=false error=null
+[STEP] step=3 action=move(0.26,0.30,-0.14) reward=0.83 done=false error=null
+[STEP] step=4 action=move(0.21,0.24,-0.11) reward=0.67 done=false error=null
+[STEP] step=5 action=move(0.10,0.10,-0.05) reward=0.30 done=false error=null
+[STEP] step=6 action=move(0.15,0.17,-0.08) reward=0.47 done=false error=null
+[STEP] step=7 action=move(0.04,0.04,-0.02) reward=0.12 done=false error=null
+[STEP] step=8 action=move(0.05,0.05,-0.05) reward=0.17 done=false error=null
+[STEP] step=9 action=move(0.05,0.05,-0.05) reward=0.16 done=false error=null
+[STEP] step=10 action=move(0.09,0.11,-0.04) reward=0.29 done=false error=null
+[DEBUG] Failed task human_touch_medium: no close frame received or sent
+[START] task=hardware_drift_hard env=camera_ptz_alignment_v1 model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action=move(-0.10,0.20,0.02) reward=0.44 done=false error=null
+[STEP] step=2 action=move(-0.10,0.10,0.05) reward=0.28 done=false error=null
+[STEP] step=3 action=move(-0.10,0.10,0.01) reward=0.28 done=false error=null
+[STEP] step=4 action=move(-0.10,0.10,0.01) reward=0.28 done=false error=null
+[STEP] step=5 action=move(-0.11,0.17,0.01) reward=0.41 done=false error=null
+[STEP] step=6 action=move(-0.05,0.05,0.01) reward=0.14 done=false error=null
+[STEP] step=7 action=move(-0.05,0.05,0.00) reward=0.14 done=false error=null
+[STEP] step=8 action=move(-0.05,0.05,0.01) reward=0.14 done=false error=null
+[STEP] step=9 action=move(-0.05,0.05,-0.01) reward=0.14 done=false error=null
+[STEP] step=10 action=move(-0.05,0.10,0.02) reward=0.22 done=false error=null
+[STEP] step=11 action=move(-0.04,0.07,-0.00) reward=0.16 done=false error=null
+[STEP] step=12 action=move(-0.03,0.06,-0.00) reward=0.14 done=false error=null
+[STEP] step=13 action=move(-0.03,0.05,-0.00) reward=0.11 done=false error=null
+[STEP] step=14 action=move(-0.02,0.02,-0.01) reward=0.05 done=false error=null
+[STEP] step=15 action=move(-0.02,0.04,0.01) reward=0.08 done=false error=null
+[STEP] step=16 action=move(-0.01,0.03,-0.00) reward=10.06 done=true error=null
+[END] success=true steps=16 score=0.922 rewards=0.44,0.28,0.28,0.28,0.41,0.14,0.14,0.14,0.14,0.22,0.16,0.14,0.11,0.05,0.08,10.06
 ```
-first_rl_demo/
-├── .dockerignore         # Docker build exclusions
-├── __init__.py            # Module exports
-├── README.md              # This file
-├── openenv.yaml           # OpenEnv manifest
-├── pyproject.toml         # Project metadata and dependencies
-├── uv.lock                # Locked dependencies (generated)
-├── client.py              # FirstRlDemoEnv client
-├── models.py              # Action and Observation models
-└── server/
-    ├── __init__.py        # Server module exports
-    ├── first_rl_demo_environment.py  # Core environment logic
-    ├── app.py             # FastAPI application (HTTP + WebSocket endpoints)
-    └── Dockerfile         # Container image definition
-```
+---
+
+## 📂 Project Structure
+
+- `server/preset_env.py` → Core logic for drift generation and reward calculation  
+- `server/app.py` → FastAPI & WebSocket entry points  
+- `models.py` → Pydantic schemas  
+- `client.py` → OpenEnv client  
+- `openenv.yaml` → Task definitions  
+- `inference.py` → Baseline agent demo  
+
+---
+
+## ✍️ Authors (Team: fp16)
+
+**Janaksinh Ven, Anubhav Tripathi, Shivam Singh**
+
+**Submission:** Meta PyTorch OpenEnv Hackathon 2026
