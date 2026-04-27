@@ -9,6 +9,18 @@ __pycache__/
 dist/
 build/
 
+# --- Research Data & Models (IMPORTANT) ---
+models/
+data/*.pkl
+data/*.csv
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# --- Experiment Tracking ---
+wandb/
+
 # --- Tools & Config ---
 .env
 .env.*
@@ -18,7 +30,6 @@ build/
 temp.ipynb
 
 # --- OpenEnv / Docker ---
-# We keep Dockerfile and .dockerignore, but ignore local build artifacts
 .docker/
 openenv_first_rl_demo.egg-info/
 

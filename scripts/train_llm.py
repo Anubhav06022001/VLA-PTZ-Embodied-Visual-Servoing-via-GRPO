@@ -5,7 +5,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -18,6 +18,16 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.vision_encoder import DINOv2Encoder
 from server.icu_env import ICUAction, HackathonICUEnv
+
+import wandb  # <--- Add this
+
+# # ... in build_args() function ...
+# def build_args() -> argparse.Namespace:
+#     # ... existing args ...
+#     parser.add_argument("--use-wandb", action=argparse.BooleanOptionalAction, default=True)
+#     parser.add_argument("--wandb-project", type=str, default="ptz-qwen-grpo")
+#     parser.add_argument("--wandb-run-name", type=str, default=None)
+#     return parser.parse_args()
 
 
 def load_hf_auth_from_env() -> None:
@@ -35,6 +45,41 @@ def load_hf_auth_from_env() -> None:
         os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", hf_token)
     else:
         print("Warning: HF_TOKEN not found in .env. HF downloads will be unauthenticated.")
+
+
+def init_hf_repo(repo_id: str, private: bool) -> Optional["HfApi"]:
+    try:
+        from huggingface_hub import HfApi
+    except Exception:
+        print("Warning: huggingface_hub not available. Hub uploads disabled.")
+        return None
+
+    token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
+    if not token:
+        print("Warning: no HF token found. Hub uploads disabled.")
+        return None
+
+    api = HfApi(token=token)
+    try:
+        api.create_repo(repo_id=repo_id, private=private, exist_ok=True)
+        print(f"HF Hub repo ready: {repo_id}")
+    except Exception as exc:
+        print(f"Warning: failed to create/access HF repo {repo_id}: {exc}")
+        return None
+    return api
+
+
+def upload_checkpoint_to_hub(api: "HfApi", repo_id: str, ckpt_path: Path) -> None:
+    try:
+        api.upload_file(
+            path_or_fileobj=str(ckpt_path),
+            path_in_repo=f"checkpoints/{ckpt_path.name}",
+            repo_id=repo_id,
+            repo_type="model",
+        )
+        print(f"Uploaded checkpoint to HF Hub: {repo_id}/checkpoints/{ckpt_path.name}")
+    except Exception as exc:
+        print(f"Warning: failed to upload checkpoint {ckpt_path.name}: {exc}")
 
 
 @dataclass
@@ -111,17 +156,21 @@ class PTZPolicy(nn.Module):
         self,
         state: PTZState,
         device: torch.device,
-        max_new_tokens: int = 36,
+        max_new_tokens: int = 128,
         temperature: float = 0.9,
         top_p: float = 0.95,
+        retry_on_invalid: bool = True,
     ) -> Dict[str, object]:
         prompt = (
-            "You control a PTZ camera. Output ONLY JSON with keys "
-            '"pan_delta" and "tilt_delta".\n'
+            "You control a PTZ camera. Respond with one JSON object only.\n"
+            'Format: {"pan_delta": <float>, "tilt_delta": <float>}\n'
+            "No markdown, no explanation, no extra keys.\n"
             f"Current pan: {state.pan:.4f}\n"
             f"Current tilt: {state.tilt:.4f}\n"
             f"Current alignment score: {state.score:.6f}\n"
-            "Goal: maximize alignment score to match the reference preset."
+            "Goal: maximize alignment score to match the reference preset.\n"
+            'Respond strictly with this exact JSON format and nothing else:\n'
+            '{'
         )
 
         input_embeds, attention_mask, prompt_len, model_embed_dtype = self._build_input_embeddings(
@@ -144,6 +193,44 @@ class PTZPolicy(nn.Module):
         generated_ids = gen.sequences[:, 0:]
         # sequences do not include inputs_embeds tokens. We decode only generated output.
         text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
+        
+        # Prepend the opening brace since we passed it in the prompt
+        if not text.startswith('{'):
+            full_text = '{' + text
+        else:
+            full_text = text
+            
+        action, is_valid = parse_action(full_text)
+
+        if retry_on_invalid and not is_valid:
+            with torch.no_grad():
+                retry_gen = self.model.generate(
+                    inputs_embeds=input_embeds,
+                    attention_mask=attention_mask,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    temperature=1.0,
+                    top_p=1.0,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    return_dict_in_generate=True,
+                    output_scores=False,
+                )
+            retry_ids = retry_gen.sequences[:, 0:]
+            retry_text = self.tokenizer.decode(retry_ids[0], skip_special_tokens=True).strip()
+            
+            # Prepend the opening brace for the retry as well
+            if not retry_text.startswith('{'):
+                full_retry_text = '{' + retry_text
+            else:
+                full_retry_text = retry_text
+                
+            retry_action, retry_valid = parse_action(full_retry_text)
+            if retry_valid:
+                generated_ids = retry_ids
+                full_text = full_retry_text
+                action = retry_action
+                is_valid = True
 
         # Recompute log-probs with grad enabled so policy loss can backpropagate.
         input_embed_layer = self.model.get_input_embeddings()
@@ -163,11 +250,11 @@ class PTZPolicy(nn.Module):
             step_log_probs.append(token_log_prob)
         log_prob_sum = torch.stack(step_log_probs).sum() if step_log_probs else torch.tensor(0.0, device=device)
 
-        action = parse_action(text)
         return {
             "prompt_len": prompt_len,
-            "text": text,
+            "text": full_text,
             "action": action,
+            "is_valid_action": is_valid,
             "log_prob_sum": log_prob_sum,
             "token_count": max(1, len(step_log_probs)),
         }
@@ -183,12 +270,18 @@ class MuJoCoPTZAdapter:
         reference_tilt: float,
         pan_delta_limit: float,
         tilt_delta_limit: float,
+        score_delta_weight: float,
+        env_reward_weight: float,
+        action_penalty_weight: float,
     ) -> None:
         self.env = HackathonICUEnv()
         self.encoder = DINOv2Encoder()
         self.sim_dim = sim_dim
         self.pan_delta_limit = pan_delta_limit
         self.tilt_delta_limit = tilt_delta_limit
+        self.score_delta_weight = score_delta_weight
+        self.env_reward_weight = env_reward_weight
+        self.action_penalty_weight = action_penalty_weight
         self.reference_pan = reference_pan
         self.reference_tilt = reference_tilt
         self.reference_image = self._capture_reference_image()
@@ -234,8 +327,14 @@ class MuJoCoPTZAdapter:
             tilt=float(obs.current_tilt),
             score=float(score),
         )
-        # Use env reward (task objective) + small shaping from similarity improvement.
-        reward = float(obs.reward) + 0.5 * float(score - state.score)
+        # Reward focuses on visual alignment progress, with mild regularization.
+        score_delta = float(score - state.score)
+        action_penalty = self.action_penalty_weight * (abs(pan_delta) + abs(tilt_delta))
+        reward = (
+            self.score_delta_weight * score_delta
+            + self.env_reward_weight * float(obs.reward)
+            - action_penalty
+        )
         return next_state, reward
 
     def _to_sim_dim(self, vec: torch.Tensor) -> torch.Tensor:
@@ -252,18 +351,32 @@ class MuJoCoPTZAdapter:
 def parse_action(text: str) -> Dict[str, float]:
     # Best case: model follows the requested JSON format.
     try:
-        data = json.loads(text)
+        json_text = extract_first_json_object(text)
+        data = json.loads(json_text)
         pan_delta = float(data.get("pan_delta", 0.0))
         tilt_delta = float(data.get("tilt_delta", 0.0))
-        return {"pan_delta": pan_delta, "tilt_delta": tilt_delta}
+        return {"pan_delta": pan_delta, "tilt_delta": tilt_delta}, True
     except Exception:
         pass
 
-    # Fallback: try to recover numbers from free text.
-    nums = re.findall(r"[-+]?\d*\.?\d+", text)
-    pan_delta = float(nums[0]) if len(nums) > 0 else 0.0
-    tilt_delta = float(nums[1]) if len(nums) > 1 else 0.0
-    return {"pan_delta": pan_delta, "tilt_delta": tilt_delta}
+    # Invalid output: force safe no-op action.
+    return {"pan_delta": 0.0, "tilt_delta": 0.0}, False
+
+
+def extract_first_json_object(text: str) -> str:
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("No JSON object start found")
+    depth = 0
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+    raise ValueError("No complete JSON object found")
 
 
 def grpo_update(
@@ -304,7 +417,13 @@ def grpo_update(
 def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training device: {device}")
-
+    # --- Initialize W&B ---
+    if args.use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config=vars(args)
+        )
     policy = PTZPolicy(
         model_name=args.model_name,
         sim_dim=args.sim_dim,
@@ -323,9 +442,17 @@ def train(args: argparse.Namespace) -> None:
         reference_tilt=args.reference_tilt,
         pan_delta_limit=args.pan_delta_limit,
         tilt_delta_limit=args.tilt_delta_limit,
+        score_delta_weight=args.score_delta_weight,
+        env_reward_weight=args.env_reward_weight,
+        action_penalty_weight=args.action_penalty_weight,
     )
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+    hub_api = None
+    if args.push_checkpoints_to_hub:
+        if not args.hub_repo_id:
+            raise ValueError("--hub-repo-id is required when --push-checkpoints-to-hub is enabled.")
+        hub_api = init_hf_repo(args.hub_repo_id, args.hub_private)
 
     for step in range(1, args.train_steps + 1):
         state = env.reset()
@@ -341,17 +468,35 @@ def train(args: argparse.Namespace) -> None:
             )
             action = out["action"]
             _, reward = env.step(state, action["pan_delta"], action["tilt_delta"])
+            if not bool(out["is_valid_action"]):
+                reward -= args.invalid_action_penalty
             out["reward"] = reward
             group_samples.append(out)
 
         metrics = grpo_update(policy, optimizer, group_samples, args.kl_beta)
+        # --- Compute additional metrics ---
+        valid_count = sum(1 for s in group_samples if bool(s["is_valid_action"]))
+        valid_rate = valid_count / max(1, len(group_samples))
 
+        # --- Log to W&B ---
+        if args.use_wandb:
+            wandb.log({
+                "train/step": step,
+                "train/loss": metrics['loss'],
+                "train/reward_mean": metrics['reward_mean'],
+                "train/reward_max": metrics['reward_max'],
+                "train/valid_action_rate": valid_rate,
+            })
+
+        
         if step % args.log_every == 0:
             example = group_samples[0]
             print(
                 f"step={step:05d} loss={metrics['loss']:.5f} "
                 f"reward_mean={metrics['reward_mean']:.5f} reward_max={metrics['reward_max']:.5f}"
             )
+            valid_count = sum(1 for s in group_samples if bool(s["is_valid_action"]))
+            print(f"valid_action_rate={valid_count / max(1, len(group_samples)):.2f}")
             print(f"example action text: {example['text'][:180]}")
 
         if step % args.save_every == 0 or step == args.train_steps:
@@ -366,11 +511,13 @@ def train(args: argparse.Namespace) -> None:
                 ckpt,
             )
             print(f"Saved checkpoint: {ckpt}")
+            if hub_api is not None:
+                upload_checkpoint_to_hub(hub_api, args.hub_repo_id, ckpt)
 
 
 def build_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train PTZ policy with Qwen2.5 + GRPO-style RL")
-    parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-3B-Instruct")
     parser.add_argument("--sim-dim", type=int, default=384, help="Dimension of Agent-1 similarity vector")
     parser.add_argument("--num-virtual-tokens", type=int, default=8)
     parser.add_argument(
@@ -393,7 +540,54 @@ def build_args() -> argparse.Namespace:
     parser.add_argument("--reference-tilt", type=float, default=0.0, help="Reference preset tilt value")
     parser.add_argument("--pan-delta-limit", type=float, default=0.2, help="Clamp LLM pan delta action")
     parser.add_argument("--tilt-delta-limit", type=float, default=0.2, help="Clamp LLM tilt delta action")
+    parser.add_argument(
+        "--score-delta-weight",
+        type=float,
+        default=10.0,
+        help="Weight for similarity improvement reward: score(t+1)-score(t).",
+    )
+    parser.add_argument(
+        "--env-reward-weight",
+        type=float,
+        default=0.05,
+        help="Small auxiliary weight for env reward to keep task grounding.",
+    )
+    parser.add_argument(
+        "--action-penalty-weight",
+        type=float,
+        default=0.1,
+        help="Penalty weight for large absolute pan/tilt deltas.",
+    )
+    parser.add_argument(
+        "--invalid-action-penalty",
+        type=float,
+        default=0.2,
+        help="Penalty applied when model output is not valid JSON action.",
+    )
+    parser.add_argument(
+        "--push-checkpoints-to-hub",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Upload saved checkpoints to Hugging Face Hub during training.",
+    )
+    parser.add_argument(
+        "--hub-repo-id",
+        type=str,
+        default="",
+        help="HF model repo id (e.g. username/ptz-qwen-grpo). Required when pushing checkpoints.",
+    )
+    parser.add_argument(
+        "--hub-private",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Create/use a private repo when pushing checkpoints.",
+    )
+    # return parser.parse_args()
+    parser.add_argument("--use-wandb", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--wandb-project", type=str, default="ptz-qwen-grpo")
+    parser.add_argument("--wandb-run-name", type=str, default=None)
     return parser.parse_args()
+
 
 
 if __name__ == "__main__":

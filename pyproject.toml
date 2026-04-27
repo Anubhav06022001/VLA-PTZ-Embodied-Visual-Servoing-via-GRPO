@@ -28,6 +28,7 @@ dependencies = [
     # "openspiel>=1.0.0",
     # "smolagents>=1.22.0,<2",
     "python-dotenv>=1.2.2",
+    "torchvision>=0.26.0",
 ]
 
 [project.optional-dependencies]
