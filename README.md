@@ -14,7 +14,7 @@ short_description: VLA policy for PTZ alignment using GRPO & DINOv2.
 # 🎯 Autonomous PTZ Camera Alignment via GRPO  
 ### Submission for the Meta PyTorch OpenEnv Hackathon 2026  
 
-**Team fp16:**  **Anubhav Tripathi**, **Janaksinh Ven**  
+**Team fp16:** [**Anubhav Tripathi**](https://splendid-tiramisu-56ef8e.netlify.app/), **Janaksinh Ven** 
 
 ---
 
@@ -102,7 +102,7 @@ example action text: {"pan_delta": 0.042, "tilt_delta": -0.015}
 Status: Converging...
 ```
 
-## 🔮 Future Research Directions (PhD Scope)
+## 🔮 Future Research Directions
 - **Quantized VLA:** Investigating 4-bit (bitsandbytes) quantization to run 7B-parameter models on edge-devices (NVIDIA Jetson) for real-time ICU deployments.
 - **Multimodal State Integration:** Incorporating depth-maps and audio-cues to handle dynamic occlusions (e.g., medical staff walking in front of the camera).
 - **Safety-Constrained RL:** Implementing Control Barrier Functions (CBF) within the GRPO loop to ensure motor movements never exceed physical structural limits.
